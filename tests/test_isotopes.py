@@ -137,11 +137,11 @@ def test_detect_mz_only(ms1_peaks):
         assert all(e <= 50e-6 for e in errors)
 
 
-def test_detect_named_spacings_find_chlorine_isotope():
-    """Test that named spacings find a 37Cl isotope that 13C alone misses.
+def test_detect_spacings_find_chlorine_isotope():
+    """Test that SPACINGS finds a 37Cl isotope that 13C alone misses.
 
-    At m/z 152 the 37Cl M+2 peak sits 9.6 mDa (64 ppm) from the 13C2 spacing,
-    beyond the default 50 ppm error, so only the named 37Cl spacing reports it.
+    At m/z 152 the 37Cl M+2 peak lies 9.6 mDa (63 ppm) from the 13C2 spacing,
+    beyond the default 50 ppm error, and 0.23 mDa from the second spacing.
     """
     features = pd.DataFrame(
         {
@@ -150,63 +150,107 @@ def test_detect_named_spacings_find_chlorine_isotope():
         }
     )
 
-    carbon = {"dims": ["mz"], "tol": [0.1], "max_isotopes": 2}
-    named = {**carbon, "delta": deimos.isotopes.SPACINGS}
-
-    carbon_isotopes = deimos.isotopes.detect(features, **carbon)
-    named_isotopes = deimos.isotopes.detect(features, **named)
+    carbon_isotopes = deimos.isotopes.detect(
+        features, dims=["mz"], tol=[0.1], max_isotopes=2
+    )
+    isotopes = deimos.isotopes.detect(
+        features,
+        dims=["mz"],
+        tol=[0.1],
+        delta=deimos.isotopes.SPACINGS,
+        max_isotopes=2,
+    )
 
     assert carbon_isotopes.iloc[0]["idx_iso"] == [1]
-    row = named_isotopes.iloc[0]
+    row = isotopes.iloc[0]
     assert row["idx_iso"] == [1, 2]
-    assert row["isotope"] == ["13C", "37Cl"]
-    assert row["multiple"] == [1.0, 2.0]
-    assert row["dx"] == [1.003355, 1.99705]
+    assert row["dx"] == [1.003355, 1.996874]
 
 
-def test_detect_named_spacings_keep_closest_spacing():
-    """Test that a pair matching several spacings keeps the closest one.
+@pytest.mark.parametrize(
+    ("child_mz", "dx", "multiple", "error"),
+    [
+        (302.0, 1.996874, 1.0, 0.003126 / 302.0),
+        (302.006, 2.00671, 2.0, 0.00071 / 302.006),
+    ],
+    ids=["second-spacing-closer", "13c-closer"],
+)
+def test_detect_spacings_assign_closest_spacing(child_mz, dx, multiple, error):
+    """Test that a pair matching several spacings is assigned the closest one.
 
-    A 2.0 m/z difference lies 2.05 mDa from 81Br, 2.95 mDa from 37Cl,
-    4.20 mDa from 34S, and 6.71 mDa from 13C2, so only 81Br is reported.
+    A 2.0 m/z difference lies 3.13 mDa from the 1.996874 spacing and 6.71 mDa
+    from 13C2 (2.00671); a 2.006 difference lies 9.13 and 0.71 mDa from them.
+    Each difference is within the default 50 ppm error of both spacings.
     """
-    features = pd.DataFrame({"mz": [300.0, 302.0], "intensity": [1000.0, 900.0]})
-    kwargs = {"dims": ["mz"], "tol": [0.1], "delta": deimos.isotopes.SPACINGS}
+    features = pd.DataFrame({"mz": [300.0, child_mz], "intensity": [1000.0, 900.0]})
 
-    isotopes = deimos.isotopes.detect(features, **kwargs)
+    isotopes = deimos.isotopes.detect(
+        features, dims=["mz"], tol=[0.1], delta=deimos.isotopes.SPACINGS
+    )
 
     row = isotopes.iloc[0]
-    assert row["isotope"] == ["81Br"]
-    assert row["multiple"] == [2.0]
-    assert row["error"] == pytest.approx([0.002048 / 302.0], abs=1e-12)
+    assert row["dx"] == [dx]
+    assert row["multiple"] == [multiple]
+    assert row["error"] == pytest.approx([error], abs=1e-12)
 
 
 @pytest.mark.parametrize(
     ("max_isotopes", "expected"),
-    [(2, 0), (4, 1)],
-    ids=["m+2-limit", "m+4-limit"],
+    [(1, 0), (2, 1)],
+    ids=["first-multiple", "second-multiple"],
 )
-def test_detect_named_spacings_search_nominal_offsets(max_isotopes, expected):
-    """Test that max_isotopes bounds the nominal mass offset of named spacings.
+def test_detect_spacings_search_multiples_of_each_spacing(max_isotopes, expected):
+    """Test that max_isotopes bounds the multiple of each spacing searched.
 
-    The child is the 37Cl2 peak, 3.99410 above its parent at M+4, so it is
-    found only when the search reaches M+4.
+    The child is the 37Cl2 peak, 3.99410 above its parent, which is twice the
+    second spacing in SPACINGS, so it is found only when the search reaches the
+    second multiple.
     """
     features = pd.DataFrame({"mz": [150.0, 153.9941], "intensity": [1000.0, 640.0]})
-    kwargs = {"dims": ["mz"], "tol": [0.1], "delta": deimos.isotopes.SPACINGS}
 
-    isotopes = deimos.isotopes.detect(features, max_isotopes=max_isotopes, **kwargs)
+    isotopes = deimos.isotopes.detect(
+        features,
+        dims=["mz"],
+        tol=[0.1],
+        delta=deimos.isotopes.SPACINGS,
+        max_isotopes=max_isotopes,
+    )
 
     assert len(isotopes) == expected
 
 
-def test_detect_named_spacings_must_be_positive():
-    """Test that a named spacing of zero or less is rejected."""
+def test_detect_float_spacing_matches_one_element_sequence():
+    """Test that a float spacing gives the same result as a sequence of it.
+
+    The children lie at one and two multiples of 1.996874, so the multiples
+    are 1 and 2.
+    """
+    features = pd.DataFrame(
+        {"mz": [150.0, 151.996874, 153.993748], "intensity": [1000.0, 320.0, 100.0]}
+    )
+
+    single = deimos.isotopes.detect(
+        features, dims=["mz"], tol=[0.1], delta=1.996874, max_isotopes=2
+    )
+    sequence = deimos.isotopes.detect(
+        features, dims=["mz"], tol=[0.1], delta=[1.996874], max_isotopes=2
+    )
+
+    assert single.iloc[0]["multiple"] == [1.0, 2.0]
+    pd.testing.assert_frame_equal(single, sequence)
+
+
+@pytest.mark.parametrize(
+    "delta",
+    [-1.003355, [1.003355, 0.0], []],
+    ids=["negative-float", "zero-in-sequence", "empty-sequence"],
+)
+def test_detect_rejects_spacings_that_are_not_positive(delta):
+    """Test that a spacing of zero or less, or no spacing, is rejected."""
     features = pd.DataFrame({"mz": [150.0, 151.0], "intensity": [1000.0, 100.0]})
-    kwargs = {"dims": ["mz"], "tol": [0.1], "delta": {"56Fe": -1.995327}}
 
     with pytest.raises(ValueError, match="positive"):
-        deimos.isotopes.detect(features, **kwargs)
+        deimos.isotopes.detect(features, dims=["mz"], tol=[0.1], delta=delta)
 
 
 def test_detect_unsorted_input():
